@@ -3,52 +3,31 @@ Description: >
     using an Auto Scaling Group
 
 Parameters:
+    VPCStackName:
+            Type: String
+            Description: Name of the VPC CF stack
 
-    EnvironmentName:
-        Description: An environment name that will be prefixed to resource names
+    SGStackName:
         Type: String
+        Description: Name of the Security Group stack
 
     InstanceType:
         Description: Which instance type should we use to build the ECS cluster?
         Type: String
-        Default: t2.medium
+        Default: t3.medium
 
     ClusterSize:
         Description: How many ECS hosts do you want to initially deploy?
         Type: Number
-        Default: 3
+        Default: 1
 
-    VPC:
-        Description: Choose which VPC this ECS cluster should be deployed to
-        Type: AWS::EC2::VPC::Id
+    # LoadBalancerCertificateArn:
+    #     Type: String
+    #     Default: 'arn:aws:acm:us-east-1:123456789012:certificate/4e2017af-9197-46e0-83bf-49b910d37366'
 
-    Subnets:
-        Description: Choose which subnets this ECS cluster should be deployed to
-        Type: List<AWS::EC2::Subnet::Id>
-
-    SecurityGroup:
-        Description: Select the Security Group to use for the ECS cluster hosts
-        Type: AWS::EC2::SecurityGroup::Id
-    
-    EFSMountTargetSecurityGroup:
-        Description: Select the Security Group to use for the ECS cluster hosts to access EFS
-        Type: AWS::EC2::SecurityGroup::Id
-
-    LoadBalancerSubnets:
-        Description: Choose which subnets the Load Balancer should be deployed to
-        Type: List<AWS::EC2::Subnet::Id>
-
-    LoadBalancerSecurityGroup:
-        Description: Select the Security Group to apply to the Load Balancer
-        Type: AWS::EC2::SecurityGroup::Id
-
-    LoadBalancerCertificateArn:
-        Type: String
-        Default: 'arn:aws:acm:us-east-1:151743893450:certificate/4e2017af-9197-46e0-83bf-49b910d37366'
-
-    DataDogApiKey:
-        Type: String
-        Default: ''
+    # DataDogApiKey:
+    #     Type: String
+    #     Default: ''
 
 Mappings:
 
@@ -85,7 +64,7 @@ Mappings:
         ap-northeast-1:
             AMI: ami-a99d8ad5
         ap-southeast-2:
-            AMI: ami-efda148d
+            AMI: ami-039bb4c3a7946ce19
         ap-southeast-1:
             AMI: ami-846144f8
         ca-central-1:
@@ -93,14 +72,14 @@ Mappings:
         ap-south-1:
             AMI: ami-72edc81d
         sa-east-1:
-            AMI: ami-4a7e2826	
+            AMI: ami-4a7e2826
 
 Resources:
 
     ECSCluster:
         Type: AWS::ECS::Cluster
         Properties:
-            ClusterName: !Ref EnvironmentName
+            ClusterName: !Ref AWS::StackName
 
     EFSFileSystem:
       Type: "AWS::EFS::FileSystem"
@@ -116,21 +95,39 @@ Resources:
       Properties:
         FileSystemId: !Ref EFSFileSystem
         SecurityGroups:
-          - !Ref EFSMountTargetSecurityGroup
-        SubnetId: !Select [ 0, !Ref Subnets]
+          - Fn::ImportValue:
+                !Sub "${SGStackName}-EFSMountTargetSecurityGroup"
+        SubnetId:
+            Fn::Select:
+                - 0
+                - Fn::Split:
+                    - ","
+                    - Fn::ImportValue:
+                        !Sub "${VPCStackName}-PrivateSubnets"
 
     EFSMountTarget1:
       Type: "AWS::EFS::MountTarget"
       Properties:
         FileSystemId: !Ref EFSFileSystem
         SecurityGroups:
-          - !Ref EFSMountTargetSecurityGroup
-        SubnetId: !Select [ 1, !Ref Subnets]
+          - Fn::ImportValue:
+                !Sub "${SGStackName}-EFSMountTargetSecurityGroup"
+        SubnetId:
+            Fn::Select:
+                - 1
+                - Fn::Split:
+                    - ","
+                    - Fn::ImportValue:
+                        !Sub "${VPCStackName}-PrivateSubnets"
 
     ECSAutoScalingGroup:
         Type: AWS::AutoScaling::AutoScalingGroup
         Properties:
-            VPCZoneIdentifier: !Ref Subnets
+            VPCZoneIdentifier:
+                Fn::Split:
+                        - ","
+                        - Fn::ImportValue:
+                            !Sub "${VPCStackName}-PrivateSubnets"
             LaunchConfigurationName: !Ref ECSLaunchConfiguration
             MinSize: !Ref ClusterSize
             MaxSize: !Ref ClusterSize
@@ -139,7 +136,7 @@ Resources:
             - Ref: ECSLoadBalancer
             Tags:
                 - Key: Name
-                  Value: !Sub ${EnvironmentName} ECS host
+                  Value: !Sub ${AWS::StackName} ECS host
                   PropagateAtLaunch: true
         CreationPolicy:
             ResourceSignal:
@@ -162,10 +159,11 @@ Resources:
         Type: AWS::AutoScaling::LaunchConfiguration
         Properties:
             ImageId:  !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
-            KeyName: 'mashape_shared'
+            KeyName: 'samli-key'
             InstanceType: !Ref InstanceType
             SecurityGroups:
-                - !Ref SecurityGroup
+                - Fn::ImportValue:
+                    !Sub "${SGStackName}-ECSHostSecurityGroup"
             IamInstanceProfile: !Ref ECSInstanceProfile
             BlockDeviceMappings:
               - DeviceName: "/dev/xvdcz"
@@ -183,11 +181,6 @@ Resources:
                     echo "$aws_az.${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/    /var/jenkins_home   nfs4    defaults" >> /etc/fstab
                     mount -a
                     chmod -R 777 /var/jenkins_home
-                    DD_API_KEY=${DataDogApiKey} bash -c "$(curl -L https://raw.githubusercontent.com/DataDog/datadog-agent/master/cmd/agent/install_script.sh)"
-                    usermod -a -G docker dd-agent
-                    echo "ecs_agent_url: http://localhost:51678/" >> /etc/datadog-agent/datadog.yaml
-                    echo "collect_ec2_tags: true" >> /etc/datadog-agent/datadog.yaml
-                    cp /etc/datadog-agent/conf.d/docker.d/conf.yaml.example /etc/datadog-agent/conf.d/docker.d/conf.yaml
                     echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
                     echo ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION=10m >> /etc/ecs/ecs.config
                     echo ECS_IMAGE_CLEANUP_INTERVAL=30s >> /etc/ecs/ecs.config
@@ -263,14 +256,21 @@ Resources:
     ECSLoadBalancer:
         Type: AWS::ElasticLoadBalancing::LoadBalancer
         Properties:
-            Subnets: !Ref LoadBalancerSubnets
+            Subnets:
+                Fn::Split:
+                    - ","
+                    - Fn::ImportValue:
+                        !Sub "${VPCStackName}-PublicSubnets"
             SecurityGroups: 
-                - !Ref LoadBalancerSecurityGroup
+                - Fn::ImportValue:
+                    !Sub "${SGStackName}-LoadBalancerSecurityGroup"
             Listeners:
-            - LoadBalancerPort: '443'
+            # - LoadBalancerPort: '443'
+            - LoadBalancerPort: '80'
               InstancePort: '8080'
-              Protocol: HTTPS
-              SSLCertificateId: !Ref LoadBalancerCertificateArn  
+              Protocol: HTTP
+            #   Protocol: HTTPS
+            #   SSLCertificateId: !Ref LoadBalancerCertificateArn  
             - LoadBalancerPort: '50000'
               InstancePort: '50000'
               Protocol: TCP
@@ -383,7 +383,7 @@ Resources:
         Type: AWS::IAM::Role
         Properties:
             Path: /
-            RoleName: !Sub ${EnvironmentName}-ECSRole-${AWS::Region}
+            RoleName: !Sub ${AWS::StackName}-ECSRole-${AWS::Region}
             AssumeRolePolicyDocument: |
                 {
                     "Statement": [{
@@ -447,7 +447,12 @@ Resources:
                                 "s3:AbortMultipartUpload",
                                 "s3:ListMultipartUploadParts",
                                 "s3:ListBucket",
-                                "s3:ListBucketMultipartUploads"
+                                "s3:ListBucketMultipartUploads",
+                                "s3:GetEncryptionConfiguration",
+                                "ssmmessages:CreateControlChannel",
+                                "ssmmessages:CreateDataChannel",
+                                "ssmmessages:OpenControlChannel",
+                                "ssmmessages:OpenDataChannel"
                             ],
                             "Resource": "*"
                         }]
@@ -491,11 +496,17 @@ Outputs:
     Cluster:
         Description: A reference to the ECS cluster
         Value: !Ref ECSCluster
+        Export:
+            Name: !Sub "${AWS::StackName}-Cluster"
 
     ECSServiceAutoScalingRole:
         Description: A reference to ECS service auto scaling role
         Value: !GetAtt ECSServiceAutoScalingRole.Arn
+        Export:
+            Name: !Sub "${AWS::StackName}-ECSServiceAutoScalingRole"
 
     ECSAutoScalingGroupName:
         Description: A reference to ECS AutoScaling Group Name
         Value: !Ref ECSAutoScalingGroup
+        Export:
+            Name: !Sub "${AWS::StackName}-ECSAutoScalingGroupName"

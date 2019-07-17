@@ -3,51 +3,48 @@ Description: >
     We create them it a seperate nested template, so it can be referenced by all of the other nested templates.
 
 Parameters:
-
-    EnvironmentName:
-        Description: An environment name that will be prefixed to resource names
+    VPCStackName:
         Type: String
-
-    VPC:
-        Type: AWS::EC2::VPC::Id
-        Description: Choose which VPC the Application Load Balancer should be deployed to
-
-    Subnets:
-        Description: Choose which subnets the Application Load Balancer should be deployed to
-        Type: List<AWS::EC2::Subnet::Id>
-
-    SecurityGroup:
-        Description: Select the Security Group to apply to the Application Load Balancer
-        Type: AWS::EC2::SecurityGroup::Id
-    
-    LoadBalancerCertificateArn:
+        Description: Name of the VPC CF stack
+    SGStackName:
         Type: String
-        Default: 'arn:aws:acm:us-east-1:151743893450:certificate/4e2017af-9197-46e0-83bf-49b910d37366'
+        Description: Name of the Security Group stack
+
+    # LoadBalancerCertificateArn:
+    #     Type: String
+    #     Default: 'arn:aws:acm:ap-southeast-2:123456789012:certificate/4e2017af-9197-46e0-83bf-49b910d37366'
 
 Resources:
 
     LoadBalancer:
         Type: AWS::ElasticLoadBalancingV2::LoadBalancer
         Properties:
-            Name: !Ref EnvironmentName
-            Subnets: !Ref Subnets
+            Name: !Ref AWS::StackName
+            Subnets:
+                Fn::Split:
+                    - ","
+                    - Fn::ImportValue:
+                        !Sub "${VPCStackName}-PublicSubnets"
             SecurityGroups: 
-                - !Ref SecurityGroup
+                - Fn::ImportValue:
+                    !Sub "${SGStackName}-LoadBalancerSecurityGroup"
             Tags: 
                 - Key: Name
-                  Value: !Ref EnvironmentName
+                  Value: !Ref AWS::StackName
 
     LoadBalancerListener:
         Type: AWS::ElasticLoadBalancingV2::Listener
         Properties:
             LoadBalancerArn: !Ref LoadBalancer
-            Port: 443
-            Protocol: HTTPS
+            # Port: 443
+            # Protocol: HTTPS
+            Protocol: HTTP
+            Port: 80
             DefaultActions: 
                 - Type: forward
                   TargetGroupArn: !Ref DefaultTargetGroup
-            Certificates:
-                - CertificateArn: !Ref LoadBalancerCertificateArn
+            # Certificates:
+            #     - CertificateArn: !Ref LoadBalancerCertificateArn
     
     # We define a default target group here, as this is a mandatory Parameters
     # when creating an Application Load Balancer Listener. This is not used, instead
@@ -55,8 +52,10 @@ Resources:
     DefaultTargetGroup:
         Type: AWS::ElasticLoadBalancingV2::TargetGroup
         Properties:
-            Name: !Sub ${EnvironmentName}-default
-            VpcId: !Ref VPC
+            Name: !Sub ${AWS::StackName}-default
+            VpcId:
+                Fn::ImportValue:
+                    !Sub "${VPCStackName}-VPC"
             Port: 80
             Protocol: HTTP
            
@@ -65,13 +64,19 @@ Outputs:
     LoadBalancer:
         Description: A reference to the Application Load Balancer
         Value: !Ref LoadBalancer
+        Export:
+            Name: !Sub "${AWS::StackName}-LoadBalancer"
 
     LoadBalancerUrl:
         Description: The URL of the ALB
         Value: !GetAtt LoadBalancer.DNSName
+        Export:
+            Name: !Sub "${AWS::StackName}-LoadBalancerUrl"
 
     Listener:
         Description: A reference to a port 80 listener
-        Value: !Ref LoadBalancerListener  
+        Value: !Ref LoadBalancerListener
+        Export:
+            Name: !Sub "${AWS::StackName}-Listener"
 
     
